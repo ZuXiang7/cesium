@@ -10,7 +10,6 @@ import createGuid from "../Core/createGuid.js";
 import CullingVolume from "../Core/CullingVolume.js";
 import defaultValue from "../Core/defaultValue.js";
 import defined from "../Core/defined.js";
-import deprecationWarning from "../Core/deprecationWarning.js";
 import destroyObject from "../Core/destroyObject.js";
 import DeveloperError from "../Core/DeveloperError.js";
 import EllipsoidGeometry from "../Core/EllipsoidGeometry.js";
@@ -132,6 +131,7 @@ var requestRenderAfterFrame = function (scene) {
  * @param {MapProjection} [options.mapProjection=new GeographicProjection()] The map projection to use in 2D and Columbus View modes.
  * @param {Boolean} [options.orderIndependentTranslucency=true] If true and the configuration supports it, use order independent translucency.
  * @param {Boolean} [options.scene3DOnly=false] If true, optimizes memory use and performance for 3D mode but disables the ability to use 2D or Columbus View.
+ * @param {Number} [options.terrainExaggeration=1.0] A scalar used to exaggerate the terrain. Note that terrain exaggeration will not modify any other primitive as they are positioned relative to the ellipsoid.
  * @param {Boolean} [options.shadows=false] Determines if shadows are cast by light sources.
  * @param {MapMode2D} [options.mapMode2D=MapMode2D.INFINITE_SCROLL] Determines if the 2D map is rotatable or can be scrolled infinitely in the horizontal direction.
  * @param {Boolean} [options.requestRenderMode=false] If true, rendering a frame will only occur when needed as determined by changes within the scene. Enabling improves performance of the application, but requires using {@link Scene#requestRender} to render a new frame explicitly in this mode. This will be necessary in many cases after making changes to the scene in other parts of the API. See {@link https://cesium.com/blog/2018/01/24/cesium-scene-rendering-performance/|Improving Performance with Explicit Rendering}.
@@ -261,6 +261,9 @@ function Scene(options) {
 
   this._minimumDisableDepthTestDistance = 0.0;
   this._debugInspector = new DebugInspector();
+
+  //Signature: Frustum, depthBuffer
+  this.rsOnFrustumRender = new Event();
 
   /**
    * Exceptions occurring in <code>render</code> are always caught in order to raise the
@@ -613,12 +616,6 @@ function Scene(options) {
 
   this._brdfLutGenerator = new BrdfLutGenerator();
 
-  if (defined(options.terrainExaggeration)) {
-    deprecationWarning(
-      "terrainExaggeration-removed",
-      "terrainExaggeration is now a property of Globe"
-    );
-  }
   this._terrainExaggeration = defaultValue(options.terrainExaggeration, 1.0);
 
   this._performanceDisplay = undefined;
@@ -750,7 +747,7 @@ function Scene(options) {
   this.sphericalHarmonicCoefficients = undefined;
 
   /**
-   * The url to the KTX2 file containing the specular environment map and convoluted mipmaps for image-based lighting of PBR models.
+   * The url to the KTX file containing the specular environment map and convoluted mipmaps for image-based lighting of PBR models.
    * @type {String}
    */
   this.specularEnvironmentMaps = undefined;
@@ -764,6 +761,9 @@ function Scene(options) {
 
   // Give frameState, camera, and screen space camera controller initial state before rendering
   updateFrameNumber(this, 0.0, JulianDate.now());
+
+  
+
   this.updateFrameState();
   this.initializeFrame();
 }
@@ -1438,30 +1438,14 @@ Object.defineProperties(Scene.prototype, {
   },
 
   /**
-   * Gets or sets the scalar used to exaggerate the terrain.
+   * Gets the scalar used to exaggerate the terrain.
    * @memberof Scene.prototype
    * @type {Number}
+   * @readonly
    */
   terrainExaggeration: {
     get: function () {
-      deprecationWarning(
-        "terrainExaggeration-removed",
-        "terrainExaggeration is now a property of Globe"
-      );
-      if (defined(this.globe)) {
-        return this.globe.terrainExaggeration;
-      }
       return this._terrainExaggeration;
-    },
-    set: function (value) {
-      deprecationWarning(
-        "terrainExaggeration-removed",
-        "terrainExaggeration is now a property of Globe"
-      );
-      if (defined(this.globe)) {
-        this.globe.terrainExaggeration = value;
-      }
-      this._terrainExaggeration = value;
     },
   },
 
@@ -1695,14 +1679,8 @@ Scene.prototype.getCompressedTextureFormatSupported = function (format) {
       context.s3tc) ||
     ((format === "WEBGL_compressed_texture_pvrtc" || format === "pvrtc") &&
       context.pvrtc) ||
-    ((format === "WEBGL_compressed_texture_etc" || format === "etc") &&
-      context.etc) ||
     ((format === "WEBGL_compressed_texture_etc1" || format === "etc1") &&
-      context.etc1) ||
-    ((format === "WEBGL_compressed_texture_astc" || format === "astc") &&
-      context.astc) ||
-    ((format === "EXT_texture_compression_bptc" || format === "bc7") &&
-      context.bc7)
+      context.etc1)
   );
 };
 
@@ -1927,6 +1905,7 @@ Scene.prototype.updateFrameState = function () {
     camera.upWC
   );
   frameState.occluder = getOccluder(this);
+  frameState.terrainExaggeration = this._terrainExaggeration;
   frameState.minimumTerrainHeight = 0.0;
   frameState.minimumDisableDepthTestDistance = this._minimumDisableDepthTestDistance;
   frameState.invertClassification = this.invertClassification;
@@ -1939,11 +1918,6 @@ Scene.prototype.updateFrameState = function () {
   frameState.light = this.light;
   frameState.cameraUnderground = this._cameraUnderground;
   frameState.globeTranslucencyState = this._globeTranslucencyState;
-
-  if (defined(this.globe)) {
-    frameState.terrainExaggeration = this.globe.terrainExaggeration;
-    frameState.terrainExaggerationRelativeHeight = this.globe.terrainExaggerationRelativeHeight;
-  }
 
   if (
     defined(this._specularEnvironmentMapAtlas) &&
@@ -2374,6 +2348,9 @@ function executeCommands(scene, passState) {
   // Determine how translucent surfaces will be handled.
   var executeTranslucentCommands;
   if (environmentState.useOIT) {
+    ;
+    let prev_depth_write =scene.context._gl.getParameter(scene.context._gl.DEPTH_WRITEMASK);
+    //scene.context._gl.depthMask(true);
     if (!defined(scene._executeOITFunction)) {
       scene._executeOITFunction = function (
         scene,
@@ -2392,6 +2369,7 @@ function executeCommands(scene, passState) {
       };
     }
     executeTranslucentCommands = scene._executeOITFunction;
+    scene.context._gl.depthMask(prev_depth_write);
   } else if (passes.render) {
     executeTranslucentCommands = executeTranslucentCommandsBackToFront;
   } else {
@@ -2690,28 +2668,6 @@ function executeCommands(scene, passState) {
       invertClassification
     );
 
-    // Classification for translucent 3D Tiles
-    var has3DTilesClassificationCommands =
-      frustumCommands.indices[Pass.CESIUM_3D_TILE_CLASSIFICATION] > 0;
-    if (
-      has3DTilesClassificationCommands &&
-      view.translucentTileClassification.isSupported()
-    ) {
-      view.translucentTileClassification.executeTranslucentCommands(
-        scene,
-        executeCommand,
-        passState,
-        commands,
-        globeDepth.framebuffer
-      );
-      view.translucentTileClassification.executeClassificationCommands(
-        scene,
-        executeCommand,
-        passState,
-        frustumCommands
-      );
-    }
-
     if (
       context.depthTexture &&
       scene.useDepthPicking &&
@@ -2732,6 +2688,9 @@ function executeCommands(scene, passState) {
       passState.framebuffer = globeDepth.framebuffer;
     }
 
+    //ADDED
+    if(scene.rsExtension!==undefined && scene.rsExtension!==null)
+      scene.rsExtension.rsOnFrustumRender.raiseEvent(frustum,globeDepth);
     if (picking || !usePostProcessSelected) {
       continue;
     }
@@ -3599,14 +3558,6 @@ Scene.prototype.resolveFramebuffers = function (passState) {
     view.oit.execute(context, passState);
   }
 
-  var translucentTileClassification = view.translucentTileClassification;
-  if (
-    translucentTileClassification.hasTranslucentDepth &&
-    translucentTileClassification.isSupported()
-  ) {
-    translucentTileClassification.execute(this, passState);
-  }
-
   if (usePostProcess) {
     var inputFramebuffer = sceneFramebuffer;
     if (useGlobeDepthFramebuffer && !useOIT) {
@@ -3784,6 +3735,7 @@ function render(scene) {
   frameState.tilesetPassState = renderTilesetPassState;
 
   var backgroundColor = defaultValue(scene.backgroundColor, Color.BLACK);
+  backgroundColor.a = 0;
   if (scene._hdr) {
     backgroundColor = Color.clone(backgroundColor, scratchBackgroundColor);
     backgroundColor.red = Math.pow(backgroundColor.red, scene.gamma);
