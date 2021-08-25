@@ -16,8 +16,6 @@ Thumbs.db
 
 /Specs/SpecList.js
 
-Source/ThirdParty/_commonjsHelpers*
-
 /node_modules
 npm-debug.log
 npm-debug.log.*
